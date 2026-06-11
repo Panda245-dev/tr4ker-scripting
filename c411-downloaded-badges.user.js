@@ -1071,10 +1071,65 @@
     return parts.join("\n");
   }
 
-  function altTooltip(matches) {
+  function isActiveSeedRelease(release) {
+    return Array.isArray(release.sources) && release.sources.includes("active-seeds");
+  }
+
+  function seedRatio(release) {
+    const uploaded = Number(release.uploaded);
+    const size = Number(release.size);
+    if (!Number.isFinite(uploaded) || !Number.isFinite(size) || size <= 0) {
+      return null;
+    }
+
+    return uploaded / size;
+  }
+
+  function seedRatioClass(release) {
+    const ratio = seedRatio(release);
+    if (ratio === null) {
+      return "";
+    }
+
+    if (ratio < 1) {
+      return "c411-dl-badge--seed-ratio-low";
+    }
+
+    if (ratio < 2) {
+      return "c411-dl-badge--seed-ratio-warn";
+    }
+
+    if (ratio < 3) {
+      return "c411-dl-badge--seed-ratio-mid";
+    }
+
+    if (ratio < 4) {
+      return "c411-dl-badge--seed-ratio-good";
+    }
+
+    if (ratio < 5) {
+      return "c411-dl-badge--seed-ratio-ok";
+    }
+
+    return "";
+  }
+
+  function formatRatio(value) {
+    if (value < 10) {
+      return value.toFixed(2);
+    }
+
+    return value.toFixed(1);
+  }
+
+  function altTooltip(matches, media) {
     const lines = [`Autre release deja telechargee (${matches.length})`];
+    if (media?.mediaTitle || media?.mediaKey) {
+      const year = media.mediaYear ? ` (${media.mediaYear})` : "";
+      lines.push(`${media.mediaTitle || media.mediaKey}${year}`);
+    }
     for (const match of matches.slice(0, 3)) {
-      const date = match.downloadedAt ? ` - ${match.downloadedAt}` : "";
+      const date = match.downloadedAt ? ` - ${formatDownloadedAt(match.downloadedAt)}` : "";
       lines.push(`${match.name}${date}`);
     }
     if (matches.length > 3) {
