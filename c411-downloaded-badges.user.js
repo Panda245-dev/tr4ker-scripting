@@ -12,22 +12,40 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
   "use strict";
 
   const STORAGE_KEY = "c411DownloadedBadges.cache.v1";
+  const DETAILS_KEY = "c411DownloadedBadges.details.v1";
   const SETTINGS_KEY = "c411DownloadedBadges.settings.v1";
   const RECENT_DOWNLOAD_CLICK_KEY = "c411DownloadedBadges.recentDownloadClick.v1";
   const HASH_RE = /\/torrents\/([a-f0-9]{40})(?:[/?#]|$)/i;
+  const PROFILE_SOURCES = [
+    {
+      key: "downloads",
+      label: "telechargements",
+      path: "/api/profile/downloads",
+      required: true,
+    },
+    {
+      key: "active-seeds",
+      label: "seeds actifs",
+      path: "/api/profile/active-seeds",
+      required: true,
+    },
+  ];
 
   const DEFAULT_SETTINGS = {
     autoSyncHours: 24,
     downloadSyncDelayMs: 4000,
-    perPage: 20,
+    perPage: 50,
     showAltBadge: true,
     maxPagesPerSync: 200,
+    mediaDetailCacheDays: 300,
+    maxMediaDetailsPerSync: 300,
   };
 
   const TECHNICAL_TOKENS = new Set([
@@ -96,24 +114,33 @@
 
   const state = {
     cache: normalizeCache(GM_getValue(STORAGE_KEY, null)),
+    detailCache: normalizeDetailCache(GM_getValue(DETAILS_KEY, null)),
     settings: { ...DEFAULT_SETTINGS, ...GM_getValue(SETTINGS_KEY, {}) },
     exactByHash: new Map(),
     altByKey: new Map(),
+    mediaByHash: new Map(),
+    altByMediaKey: new Map(),
     syncInProgress: false,
     annotateTimer: null,
     downloadSyncTimer: null,
+    detailFetchInProgress: false,
+    detailFetchTimer: null,
+    detailQueue: [],
+    detailQueuedHashes: new Set(),
     statusEl: null,
   };
 
   addStyles();
   rebuildIndexes();
   registerMenu();
+  exposeDebugHelpers();
   renderStatusWidget();
   scheduleAnnotate();
   observePageChanges();
   observeDownloadClicks();
   maybeSyncAfterRecentDownloadClick();
   maybeAutoSync();
+  scheduleMediaEnrichment();
 
   function addStyles() {
     GM_addStyle(`
@@ -480,6 +507,8 @@
         syncedAt: null,
         total: 0,
         totalPages: 0,
+        sourceFetched: {},
+        sourceTotals: {},
         releases: [],
       };
     }
@@ -493,39 +522,114 @@
       syncedAt: cache.syncedAt || null,
       total: Number(cache.total) || releases.length,
       totalPages: Number(cache.totalPages) || 0,
+      sourceFetched: normalizeSourceTotals(cache.sourceFetched),
+      sourceTotals: normalizeSourceTotals(cache.sourceTotals),
       releases,
     };
   }
 
+  function normalizeSourceTotals(sourceTotals) {
+    const totals = {};
+    if (!sourceTotals || typeof sourceTotals !== "object") {
+      return totals;
+    }
+
+    for (const [key, value] of Object.entries(sourceTotals)) {
+      if (Number.isFinite(Number(value))) {
+        totals[key] = Number(value);
+      }
+    }
+
+    return totals;
+  }
+
+  function normalizeDetailCache(cache) {
+    const torrents = {};
+    if (cache && typeof cache === "object" && cache.torrents && typeof cache.torrents === "object") {
+      for (const [hash, detail] of Object.entries(cache.torrents)) {
+        const infoHash = String(hash || "").toLowerCase();
+        if (!/^[a-f0-9]{40}$/.test(infoHash) || !detail || typeof detail !== "object") {
+          continue;
+        }
+
+        torrents[infoHash] = {
+          infoHash,
+          fetchedAt: detail.fetchedAt || null,
+          mediaKey: detail.mediaKey || "",
+          tmdbId: detail.tmdbId ?? null,
+          imdbId: detail.imdbId || "",
+          mediaType: detail.mediaType || "",
+          mediaTitle: detail.mediaTitle || "",
+          mediaYear: detail.mediaYear ?? null,
+          notFound: Boolean(detail.notFound),
+        };
+      }
+    }
+
+    return {
+      version: 1,
+      torrents,
+    };
+  }
+
   function normalizeRelease(item) {
-    if (!item || typeof item !== "object" || !item.infoHash) {
+    if (!item || typeof item !== "object") {
       return null;
     }
 
-    const infoHash = String(item.infoHash).toLowerCase();
+    const torrent = item.torrent && typeof item.torrent === "object" ? item.torrent : {};
+    const infoHash = String(
+      item.infoHash
+        || item.info_hash
+        || item.hash
+        || torrent.infoHash
+        || torrent.info_hash
+        || torrent.hash
+        || "",
+    ).toLowerCase();
+
     if (!/^[a-f0-9]{40}$/.test(infoHash)) {
       return null;
     }
 
-    const name = String(item.name || "").trim();
+    const name = String(item.name || item.torrentName || item.torrent_name || torrent.name || "").trim();
     const key = buildContentKey(name);
+    const category = item.category || torrent.category || {};
+    const sources = Array.isArray(item.sources)
+      ? item.sources.map((source) => String(source)).filter(Boolean)
+      : [item.source ? String(item.source) : ""].filter(Boolean);
 
     return {
       infoHash,
-      torrentId: item.torrentId ?? null,
+      torrentId: item.torrentId ?? item.torrent_id ?? torrent.id ?? null,
       name,
       normalizedKey: key,
-      category: item.category && item.category.name ? String(item.category.name) : "",
-      downloadedAt: item.downloadedAt || "",
+      category: category && category.name ? String(category.name) : "",
+      downloadedAt: item.downloadedAt || item.downloaded_at || item.completedAt || item.completed_at || "",
+      size: Number.isFinite(Number(item.size)) ? Number(item.size) : null,
+      seedingTime: Number.isFinite(Number(item.seedingTime)) ? Number(item.seedingTime) : null,
+      uploaded: Number.isFinite(Number(item.uploaded)) ? Number(item.uploaded) : null,
+      mediaKey: item.mediaKey || "",
+      sources,
     };
   }
 
   function rebuildIndexes() {
     state.exactByHash = new Map();
     state.altByKey = new Map();
+    state.mediaByHash = new Map();
+    state.altByMediaKey = new Map();
 
     for (const release of state.cache.releases) {
       state.exactByHash.set(release.infoHash, release);
+
+      const media = mediaForHash(release.infoHash);
+      if (media && media.mediaKey) {
+        state.mediaByHash.set(release.infoHash, media);
+        const mediaMatches = state.altByMediaKey.get(media.mediaKey) || [];
+        mediaMatches.push(release);
+        state.altByMediaKey.set(media.mediaKey, mediaMatches);
+      }
 
       if (release.normalizedKey) {
         const matches = state.altByKey.get(release.normalizedKey) || [];
