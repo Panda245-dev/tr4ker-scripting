@@ -344,6 +344,7 @@
         }
 
         if (isDownloadAction(action)) {
+          addManualDownloadFromAction(action);
           scheduleSyncAfterDownloadClick();
         }
       },
@@ -542,6 +543,246 @@
     } catch (error) {
       throw new Error("reponse API invalide ou session expiree");
     }
+  }
+
+  function scheduleMediaEnrichment() {
+    const max = Math.max(0, Number(state.settings.maxMediaDetailsPerSync) || DEFAULT_SETTINGS.maxMediaDetailsPerSync);
+    let queued = 0;
+
+    for (const release of state.cache.releases) {
+      if (queued >= max) {
+        break;
+      }
+
+      if (queueTorrentDetailFetch(release.infoHash)) {
+        queued += 1;
+      }
+    }
+  }
+
+  function queueTorrentDetailFetch(infoHash) {
+    const hash = String(infoHash || "").toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(hash) || !needsTorrentDetailFetch(hash) || state.detailQueuedHashes.has(hash)) {
+      return false;
+    }
+
+    state.detailQueuedHashes.add(hash);
+    state.detailQueue.push(hash);
+    scheduleDetailQueueProcessing();
+    return true;
+  }
+
+  function scheduleDetailQueueProcessing() {
+    if (state.detailFetchInProgress) {
+      return;
+    }
+
+    window.clearTimeout(state.detailFetchTimer);
+    state.detailFetchTimer = window.setTimeout(() => {
+      processDetailQueue().catch((error) => {
+        console.error("[C411 DL] Enrichissement media echoue", error);
+      });
+    }, 250);
+  }
+
+  async function processDetailQueue() {
+    if (state.detailFetchInProgress || !state.detailQueue.length) {
+      return;
+    }
+
+    state.detailFetchInProgress = true;
+    let updated = false;
+
+    try {
+      while (state.detailQueue.length) {
+        const hash = state.detailQueue.shift();
+        state.detailQueuedHashes.delete(hash);
+
+        if (!needsTorrentDetailFetch(hash)) {
+          continue;
+        }
+
+        try {
+          updateStatus("Enrichissement media...");
+          const payload = await fetchTorrentDetail(hash);
+          storeTorrentDetail(hash, payload);
+          updated = true;
+        } catch (error) {
+          if (error.status === 404) {
+            storeTorrentDetailNotFound(hash);
+            updated = true;
+          } else {
+            console.warn(`[C411 DL] Detail torrent ignore pour ${hash}`, error);
+          }
+        }
+      }
+    } finally {
+      state.detailFetchInProgress = false;
+      if (updated) {
+        GM_setValue(DETAILS_KEY, state.detailCache);
+        rebuildIndexes();
+        clearBadges();
+        scheduleAnnotate();
+      }
+      updateStatus(statusSummary());
+    }
+  }
+
+  function needsTorrentDetailFetch(infoHash) {
+    const detail = state.detailCache.torrents[infoHash];
+    if (!detail || !detail.fetchedAt) {
+      return true;
+    }
+
+    const fetchedAt = Date.parse(detail.fetchedAt);
+    if (!fetchedAt) {
+      return true;
+    }
+
+    const maxAgeMs = Math.max(
+      1,
+      Number(state.settings.mediaDetailCacheDays) || DEFAULT_SETTINGS.mediaDetailCacheDays,
+    ) * 24 * 60 * 60 * 1000;
+
+    return Date.now() - fetchedAt > maxAgeMs;
+  }
+
+  async function fetchTorrentDetail(infoHash) {
+    const url = new URL(`/api/torrents/${infoHash}`, window.location.origin);
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      credentials: "include",
+      headers: {
+        accept: "application/json",
+      },
+    });
+
+    const text = await response.text();
+    if (!response.ok) {
+      const error = new Error(`HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      throw new Error("reponse API torrent invalide");
+    }
+  }
+
+  function storeTorrentDetail(infoHash, payload) {
+    const hash = String(payload?.infoHash || infoHash || "").toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(hash)) {
+      return null;
+    }
+
+    const media = extractMediaInfo(payload);
+    const detail = {
+      infoHash: hash,
+      fetchedAt: new Date().toISOString(),
+      mediaKey: media?.mediaKey || "",
+      tmdbId: media?.tmdbId ?? null,
+      imdbId: media?.imdbId || "",
+      mediaType: media?.mediaType || "",
+      mediaTitle: media?.mediaTitle || "",
+      mediaYear: media?.mediaYear ?? null,
+      notFound: false,
+    };
+
+    state.detailCache.torrents[hash] = detail;
+    return detail;
+  }
+
+  function storeTorrentDetailNotFound(infoHash) {
+    const hash = String(infoHash || "").toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(hash)) {
+      return null;
+    }
+
+    const detail = {
+      infoHash: hash,
+      fetchedAt: new Date().toISOString(),
+      mediaKey: "",
+      tmdbId: null,
+      imdbId: "",
+      mediaType: "",
+      mediaTitle: "",
+      mediaYear: null,
+      notFound: true,
+    };
+
+    state.detailCache.torrents[hash] = detail;
+    return detail;
+  }
+
+  function extractMediaInfo(payload) {
+    const tmdbData = payload?.metadata?.tmdbData || payload?.tmdbData || null;
+    const description = String(payload?.description || "");
+    const tmdbFromDescription = description.match(/themoviedb\.org\/(movie|tv)\/(\d+)/i);
+    const imdbFromDescription = description.match(/imdb\.com\/title\/(tt\d+)/i);
+    const mediaType = String(tmdbData?.type || tmdbFromDescription?.[1] || "").toLowerCase();
+    const tmdbId = Number(tmdbData?.id || tmdbFromDescription?.[2] || 0);
+    const imdbId = String(tmdbData?.imdbId || imdbFromDescription?.[1] || "").toLowerCase();
+
+    let mediaKey = "";
+    if (Number.isFinite(tmdbId) && tmdbId > 0) {
+      mediaKey = `tmdb:${mediaType || "unknown"}:${tmdbId}`;
+    } else if (/^tt\d+$/.test(imdbId)) {
+      mediaKey = `imdb:${imdbId}`;
+    }
+
+    if (!mediaKey) {
+      return null;
+    }
+
+    return {
+      mediaKey,
+      tmdbId: Number.isFinite(tmdbId) && tmdbId > 0 ? tmdbId : null,
+      imdbId,
+      mediaType,
+      mediaTitle: String(tmdbData?.title || tmdbData?.name || tmdbData?.originalTitle || "").trim(),
+      mediaYear: Number.isFinite(Number(tmdbData?.year)) ? Number(tmdbData.year) : null,
+    };
+  }
+
+  function mediaForHash(infoHash) {
+    const detail = detailForHash(infoHash);
+    return detail && detail.mediaKey ? detail : null;
+  }
+
+  function detailForHash(infoHash) {
+    return state.detailCache.torrents[String(infoHash || "").toLowerCase()] || null;
+  }
+
+  function mergeReleaseIntoMap(releasesByHash, release) {
+    const existing = releasesByHash.get(release.infoHash);
+    if (!existing) {
+      releasesByHash.set(release.infoHash, release);
+      return;
+    }
+
+    releasesByHash.set(release.infoHash, mergeReleases(existing, release));
+  }
+
+  function mergeReleases(existing, incoming) {
+    const sources = Array.from(new Set([
+      ...(existing.sources || []),
+      ...(incoming.sources || []),
+    ]));
+
+    return {
+      ...existing,
+      torrentId: existing.torrentId ?? incoming.torrentId,
+      name: existing.name || incoming.name,
+      normalizedKey: existing.normalizedKey || incoming.normalizedKey,
+      category: existing.category || incoming.category,
+      downloadedAt: existing.downloadedAt || incoming.downloadedAt,
+      size: existing.size ?? incoming.size ?? null,
+      seedingTime: existing.seedingTime ?? incoming.seedingTime ?? null,
+      uploaded: existing.uploaded ?? incoming.uploaded ?? null,
+      sources,
+    };
   }
 
   function normalizeCache(cache) {
