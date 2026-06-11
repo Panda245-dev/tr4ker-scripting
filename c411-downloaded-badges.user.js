@@ -285,9 +285,14 @@
       return "DL: non synchronise";
     }
 
+    const activeSeeds = countActiveSeedReleases();
     const date = state.cache.syncedAt ? new Date(state.cache.syncedAt) : null;
     const synced = date && !Number.isNaN(date.getTime()) ? formatDate(date) : "date inconnue";
-    return `DL: ${count} torrents, sync ${synced}`;
+    return `DL: ${count} torrents, seeds actifs: ${activeSeeds}, sync ${synced}`;
+  }
+
+  function countActiveSeedReleases() {
+    return state.cache.releases.filter(isActiveSeedRelease).length;
   }
 
   function updateStatus(message) {
@@ -428,44 +433,41 @@
       const perPage = Math.max(1, Number(state.settings.perPage) || DEFAULT_SETTINGS.perPage);
       const maxPages = Math.max(1, Number(state.settings.maxPagesPerSync) || DEFAULT_SETTINGS.maxPagesPerSync);
       const releasesByHash = new Map();
-      let total = 0;
-      let totalPages = 1;
+      const sourceTotals = {};
+      const sourceFetched = {};
+      let totalPages = 0;
 
-      for (let page = 1; page <= totalPages; page += 1) {
-        if (page > maxPages) {
-          throw new Error(`limite ${maxPages} pages atteinte`);
-        }
-
-        updateStatus(`Sync page ${page}/${totalPages}...`);
-        const payload = await fetchDownloadsPage(page, perPage);
-        const items = Array.isArray(payload.data) ? payload.data : [];
-
-        for (const item of items) {
-          const release = normalizeRelease(item);
-          if (release) {
-            releasesByHash.set(release.infoHash, release);
+      for (const source of PROFILE_SOURCES) {
+        try {
+          const sourceResult = await syncProfileSource(source, perPage, maxPages, releasesByHash);
+          totalPages += sourceResult.totalPages;
+          sourceFetched[source.key] = sourceResult.fetched;
+          if (Number.isFinite(Number(sourceResult.total))) {
+            sourceTotals[source.key] = Number(sourceResult.total);
           }
-        }
+        } catch (error) {
+          if (source.required) {
+            throw error;
+          }
 
-        if (payload.meta && Number.isFinite(Number(payload.meta.totalPages))) {
-          totalPages = Math.max(1, Number(payload.meta.totalPages));
-        }
-
-        if (payload.meta && Number.isFinite(Number(payload.meta.total))) {
-          total = Number(payload.meta.total);
+          console.warn(`[C411 DL] Source ${source.key} ignoree`, error);
         }
       }
 
+      const releases = Array.from(releasesByHash.values());
       state.cache = {
         version: 1,
         syncedAt: new Date().toISOString(),
-        total,
+        total: releases.length,
         totalPages,
-        releases: Array.from(releasesByHash.values()),
+        sourceFetched,
+        sourceTotals,
+        releases,
       };
 
       GM_setValue(STORAGE_KEY, state.cache);
       rebuildIndexes();
+      scheduleMediaEnrichment();
       clearBadges();
       scheduleAnnotate();
       updateStatus(statusSummary());
@@ -475,8 +477,50 @@
     }
   }
 
-  async function fetchDownloadsPage(page, perPage) {
-    const url = new URL("/api/profile/downloads", window.location.origin);
+  async function syncProfileSource(source, perPage, maxPages, releasesByHash) {
+    let integrated = 0;
+    let total = null;
+    let totalPages = 1;
+
+    for (let page = 1; page <= totalPages; page += 1) {
+      if (page > maxPages) {
+        throw new Error(`limite ${maxPages} pages atteinte pour ${source.label}`);
+      }
+
+      updateStatus(`Sync ${source.label} ${page}/${totalPages}...`);
+      const payload = await fetchProfilePage(source.path, page, perPage);
+      const items = Array.isArray(payload.data) ? payload.data : [];
+
+      for (const item of items) {
+        const release = normalizeRelease({ ...item, source: source.key });
+        if (release) {
+          mergeReleaseIntoMap(releasesByHash, release);
+          integrated += 1;
+        }
+      }
+
+      if (payload.meta && Number.isFinite(Number(payload.meta.totalPages))) {
+        totalPages = Math.max(1, Number(payload.meta.totalPages));
+      }
+
+      if (payload.meta && Number.isFinite(Number(payload.meta.total))) {
+        total = Number(payload.meta.total);
+        const effectivePerPage = Number.isFinite(Number(payload.meta.perPage))
+          ? Math.max(1, Number(payload.meta.perPage))
+          : perPage;
+        totalPages = Math.max(totalPages, Math.ceil(total / effectivePerPage));
+      }
+    }
+
+    if (Number.isFinite(Number(total)) && integrated < Number(total)) {
+      throw new Error(`${source.label}: ${integrated}/${total} elements integres`);
+    }
+
+    return { fetched: integrated, total, totalPages };
+  }
+
+  async function fetchProfilePage(path, page, perPage) {
+    const url = new URL(path, window.location.origin);
     url.searchParams.set("page", String(page));
     url.searchParams.set("perPage", String(perPage));
 
