@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         C411 - Pastilles torrents telecharges
 // @namespace    https://c411.org/
-// @version      0.1.1
+// @version      0.2.6
 // @description  Marque les torrents deja telecharges sur C411 avec des pastilles DL et ALT.
 // @author       Butchered
 // @icon         https://c411.org/favicon.ico
@@ -323,12 +323,32 @@
 
     GM_registerMenuCommand("C411 DL - Vider le cache", () => {
       GM_deleteValue(STORAGE_KEY);
+      GM_deleteValue(DETAILS_KEY);
       state.cache = normalizeCache(null);
+      state.detailCache = normalizeDetailCache(null);
       rebuildIndexes();
       clearBadges();
       scheduleAnnotate();
       updateStatus("Cache vide");
     });
+
+    GM_registerMenuCommand("C411 DL - Debug API torrent", () => {
+      const defaultHash = findDefaultDebugHash();
+      const input = window.prompt("InfoHash a tester avec /api/torrents/<hash>", defaultHash);
+      if (!input) {
+        return;
+      }
+
+      debugTorrentApi(input).catch((error) => {
+        console.error("[C411 DL] Debug API torrent echoue", error);
+        updateStatus(`Debug API echoue: ${error.message || error}`);
+      });
+    });
+  }
+
+  function exposeDebugHelpers() {
+    const target = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+    target.c411DlDebugTorrent = (hash) => debugTorrentApi(hash || findDefaultDebugHash());
   }
 
   function renderStatusWidget() {
@@ -1138,6 +1158,11 @@
     }
   }
 
+  function findFallbackAltMatches(infoHash, title) {
+    const key = buildContentKey(title);
+    return key ? (state.altByKey.get(key) || []).filter((release) => release.infoHash !== infoHash) : [];
+  }
+
   function clearBadges() {
     for (const badge of document.querySelectorAll(".c411-dl-badge")) {
       badge.remove();
@@ -1572,5 +1597,94 @@
       hour: "2-digit",
       minute: "2-digit",
     });
+  }
+
+  function formatDuration(seconds) {
+    const units = [
+      ["j", 24 * 60 * 60],
+      ["h", 60 * 60],
+      ["min", 60],
+    ];
+    const parts = [];
+    let remaining = Math.max(0, Math.floor(seconds));
+
+    for (const [label, size] of units) {
+      const value = Math.floor(remaining / size);
+      if (value) {
+        parts.push(`${value} ${label}`);
+        remaining -= value * size;
+      }
+      if (parts.length >= 2) {
+        break;
+      }
+    }
+
+    return parts.length ? parts.join(" ") : `${remaining} s`;
+  }
+
+  function formatBytes(bytes) {
+    const units = ["o", "Ko", "Mo", "Go", "To"];
+    let value = Math.max(0, bytes);
+    let unitIndex = 0;
+
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+
+    const rounded = value >= 10 || unitIndex === 0 ? Math.round(value) : Math.round(value * 10) / 10;
+    return `${rounded} ${units[unitIndex]}`;
+  }
+
+  function formatDownloadedAt(value) {
+    const parsedDate = parseApiUtcDate(value);
+    if (!parsedDate) {
+      return value;
+    }
+
+    return parsedDate.toLocaleString("fr-FR", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  function formatUtcApiDate(date) {
+    const pad = (value) => String(value).padStart(2, "0");
+
+    return [
+      date.getUTCFullYear(),
+      pad(date.getUTCMonth() + 1),
+      pad(date.getUTCDate()),
+    ].join("-") + " " + [
+      pad(date.getUTCHours()),
+      pad(date.getUTCMinutes()),
+      pad(date.getUTCSeconds()),
+    ].join(":");
+  }
+
+  function parseApiUtcDate(value) {
+    const match = String(value || "").match(
+      /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/,
+    );
+
+    if (!match) {
+      return null;
+    }
+
+    const [, year, month, day, hour, minute, second = "0"] = match;
+    const timestamp = Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    );
+
+    return Number.isNaN(timestamp) ? null : new Date(timestamp);
   }
 })();
