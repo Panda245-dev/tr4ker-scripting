@@ -163,6 +163,11 @@
         border: 1px solid transparent;
       }
 
+      .c411-dl-badge--row {
+        margin-left: 0;
+        margin-right: 0.25rem;
+      }
+
       .c411-dl-badge--exact {
         color: #052e16;
         background: #86efac;
@@ -185,6 +190,78 @@
         color: #ffedd5;
         background: rgba(249, 115, 22, 0.22);
         border-color: rgba(251, 146, 60, 0.8);
+      }
+
+      .c411-dl-badge--seed {
+        color: #172554;
+        background: #93c5fd;
+        border-color: #3b82f6;
+      }
+
+      .dark .c411-dl-badge--seed {
+        color: #dbeafe;
+        background: rgba(59, 130, 246, 0.22);
+        border-color: rgba(96, 165, 250, 0.8);
+      }
+
+      .c411-dl-badge--seed-ratio-low {
+        color: #450a0a;
+        background: #fca5a5;
+        border-color: #ef4444;
+      }
+
+      .dark .c411-dl-badge--seed-ratio-low {
+        color: #fee2e2;
+        background: rgba(239, 68, 68, 0.24);
+        border-color: rgba(248, 113, 113, 0.85);
+      }
+
+      .c411-dl-badge--seed-ratio-warn {
+        color: #431407;
+        background: #fdba74;
+        border-color: #f97316;
+      }
+
+      .dark .c411-dl-badge--seed-ratio-warn {
+        color: #ffedd5;
+        background: rgba(249, 115, 22, 0.24);
+        border-color: rgba(251, 146, 60, 0.85);
+      }
+
+      .c411-dl-badge--seed-ratio-mid {
+        color: #422006;
+        background: #fde68a;
+        border-color: #eab308;
+      }
+
+      .dark .c411-dl-badge--seed-ratio-mid {
+        color: #fef9c3;
+        background: rgba(234, 179, 8, 0.24);
+        border-color: rgba(250, 204, 21, 0.85);
+      }
+
+      .c411-dl-badge--seed-ratio-good {
+        color: #052e16;
+        background: #86efac;
+        border-color: #22c55e;
+      }
+
+      .dark .c411-dl-badge--seed-ratio-good {
+        color: #dcfce7;
+        background: rgba(34, 197, 94, 0.24);
+        border-color: rgba(74, 222, 128, 0.85);
+      }
+
+      .c411-dl-badge--seed-ratio-ok {
+        color: #083344;
+        background: #67e8f9;
+        border-color: #06b6d4;
+      }
+
+      .dark .c411-dl-badge--seed-ratio-ok {
+        color: #cffafe;
+        background: rgba(6, 182, 212, 0.24);
+        border-color: rgba(34, 211, 238, 0.85);
       }
 
       .c411-dl-status {
@@ -950,31 +1027,69 @@
         continue;
       }
 
-      const titleInfo = findTitleInfo(link);
-      if (!titleInfo || !titleInfo.title) {
-        continue;
-      }
-
       const exactRelease = state.exactByHash.get(hash);
       if (exactRelease) {
+        const titleInfo = findTitleInfo(link) || findRowPlacement(link);
+        if (!titleInfo) {
+          link.dataset.c411DlProcessed = "1";
+          continue;
+        }
+
         addBadge(link, titleInfo, {
           type: "exact",
           label: "DL",
           title: exactTooltip(exactRelease),
         });
+
+        if (isActiveSeedRelease(exactRelease)) {
+          addBadge(link, titleInfo, {
+            type: "seed",
+            label: "Seed",
+            title: seedTooltip(exactRelease),
+            extraClass: seedRatioClass(exactRelease),
+          });
+        }
+
+        if (!mediaForHash(hash)) {
+          queueTorrentDetailFetch(hash);
+        }
         continue;
       }
 
       if (state.settings.showAltBadge) {
-        const key = buildContentKey(titleInfo.title);
-        const altMatches = key ? (state.altByKey.get(key) || []).filter((release) => release.infoHash !== hash) : [];
+        const titleInfo = findTitleInfo(link);
+        if (!titleInfo || !titleInfo.title) {
+          link.dataset.c411DlProcessed = "1";
+          continue;
+        }
+
+        const detail = detailForHash(hash);
+        const media = detail && detail.mediaKey ? detail : null;
+        const altMatches = media && media.mediaKey
+          ? (state.altByMediaKey.get(media.mediaKey) || []).filter((release) => release.infoHash !== hash)
+          : [];
 
         if (altMatches.length) {
           addBadge(link, titleInfo, {
             type: "alt",
-            label: "ALT",
-            title: altTooltip(altMatches),
+            label: "ALT ✓",
+            title: altTooltip(altMatches, media),
           });
+        } else if (!detail || !detail.fetchedAt) {
+          queueTorrentDetailFetch(hash);
+        } else if (!media || !media.mediaKey) {
+          if (needsTorrentDetailFetch(hash)) {
+            queueTorrentDetailFetch(hash);
+          }
+
+          const fallbackMatches = findFallbackAltMatches(hash, titleInfo.title);
+          if (fallbackMatches.length) {
+            addBadge(link, titleInfo, {
+              type: "alt",
+              label: "ALT!",
+              title: altTooltip(fallbackMatches, null),
+            });
+          }
         }
       }
 
@@ -997,7 +1112,127 @@
     return match ? match[1].toLowerCase() : "";
   }
 
+  function findDefaultDebugHash() {
+    return extractHash(window.location.href)
+      || extractHash(document.querySelector('a[href*="/torrents/"]')?.href)
+      || "";
+  }
+
+  async function debugTorrentApi(value) {
+    const infoHash = extractHash(value) || String(value || "").trim().toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(infoHash)) {
+      throw new Error("infoHash invalide");
+    }
+
+    updateStatus("Debug API torrent...");
+    const url = new URL(`/api/torrents/${infoHash}`, window.location.origin);
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      credentials: "include",
+      headers: {
+        accept: "application/json",
+      },
+    });
+
+    const text = await response.text();
+    let payload = null;
+    try {
+      payload = JSON.parse(text);
+    } catch (error) {
+      // Keep the raw body visible below when the endpoint returns HTML or an invalid JSON payload.
+    }
+
+    console.group(`[C411 DL] Debug API torrent ${infoHash}`);
+    console.log("URL", url.toString());
+    console.log("HTTP", response.status, response.statusText);
+    console.log("JSON", payload);
+    console.log("JSON string", payload ? JSON.stringify(payload, null, 2) : null);
+    console.log("Raw", text);
+    console.groupEnd();
+
+    if (response.status === 404) {
+      storeTorrentDetailNotFound(infoHash);
+      GM_setValue(DETAILS_KEY, state.detailCache);
+      rebuildIndexes();
+      clearBadges();
+      scheduleAnnotate();
+    } else if (payload) {
+      storeTorrentDetail(infoHash, payload);
+      GM_setValue(DETAILS_KEY, state.detailCache);
+      rebuildIndexes();
+      clearBadges();
+      scheduleAnnotate();
+    }
+
+    updateStatus(`Debug API: HTTP ${response.status}, voir console`);
+    return payload || text;
+  }
+
+  function extractDownloadHash(action) {
+    const urls = [
+      action.href,
+      action.getAttribute("href"),
+      findTorrentLinkForAction(action, "")?.href,
+      window.location.href,
+    ];
+
+    for (const url of urls) {
+      const hash = extractHash(url);
+      if (hash) {
+        return hash;
+      }
+    }
+
+    return "";
+  }
+
+  function findDownloadName(action, infoHash) {
+    const torrentLink = findTorrentLinkForAction(action, infoHash);
+    const titleInfo = torrentLink ? findTitleInfo(torrentLink) : null;
+    if (titleInfo?.title) {
+      return titleInfo.title;
+    }
+
+    const pageTitle = cleanText(document.querySelector("h1")?.textContent);
+    if (pageTitle.length > 2) {
+      return pageTitle;
+    }
+
+    const documentTitle = cleanText(document.title).replace(/\s*[-|]\s*C411.*$/i, "");
+    if (documentTitle.length > 2) {
+      return documentTitle;
+    }
+
+    return `Torrent ${infoHash.slice(0, 8)}`;
+  }
+
+  function findTorrentLinkForAction(action, infoHash) {
+    const hashSelector = infoHash ? `a[href*="${infoHash}"]` : 'a[href*="/torrents/"]';
+    const directLink = action.matches?.('a[href*="/torrents/"]') ? action : null;
+    if (directLink) {
+      return directLink;
+    }
+
+    const parentLink = action.closest?.('a[href*="/torrents/"]');
+    if (parentLink) {
+      return parentLink;
+    }
+
+    const container = action.closest?.("tr, li, article, section, [class*='group'], [class*='border']");
+    const scopedLink = container?.querySelector(hashSelector);
+    if (scopedLink) {
+      return scopedLink;
+    }
+
+    return infoHash ? document.querySelector(hashSelector) : null;
+  }
+
   function findTitleInfo(link) {
+    const rowPlacement = findRowPlacement(link);
+    if (rowPlacement) {
+      return null;
+    }
+
     const desktopTitle = link.querySelector("span.truncate.font-medium");
     if (desktopTitle && cleanText(desktopTitle.textContent).length > 2) {
       return {
@@ -1036,34 +1271,90 @@
     return null;
   }
 
+  function findRowPlacement(link) {
+    const firstChild = link.firstElementChild;
+    if (!firstChild || !firstChild.className || !String(firstChild.className).includes("border-l-")) {
+      return null;
+    }
+
+    const row = firstChild.querySelector(".flex.items-center");
+    if (!row || !row.querySelector(".flex-1")) {
+      return null;
+    }
+
+    return {
+      title: "",
+      target: row,
+      mode: "version-row",
+    };
+  }
+
   function addBadge(link, titleInfo, badgeInfo) {
-    if (link.querySelector(".c411-dl-badge")) {
+    if (link.querySelector(`.c411-dl-badge--${badgeInfo.type}`)) {
       link.dataset.c411DlProcessed = "1";
       return;
     }
 
     const badge = document.createElement("span");
     badge.className = `c411-dl-badge c411-dl-badge--${badgeInfo.type}`;
+    if (badgeInfo.extraClass) {
+      badge.classList.add(badgeInfo.extraClass);
+    }
     badge.textContent = badgeInfo.label;
     badge.title = badgeInfo.title;
 
     const target = titleInfo.target;
     if (titleInfo.mode === "append-target") {
-      target.appendChild(document.createTextNode(" "));
+      if (!target.querySelector(".c411-dl-badge")) {
+        target.appendChild(document.createTextNode(" "));
+      }
       target.appendChild(badge);
+    } else if (titleInfo.mode === "version-row") {
+      badge.classList.add("c411-dl-badge--row");
+      const spacer = target.querySelector(".flex-1");
+      target.insertBefore(badge, spacer || null);
     } else if (target.parentElement && target.parentElement.classList.contains("flex")) {
-      target.insertAdjacentElement("afterend", badge);
+      insertAfterLastBadge(target, badge);
     } else {
-      target.insertAdjacentElement("afterend", badge);
+      insertAfterLastBadge(target, badge);
     }
 
     link.dataset.c411DlProcessed = "1";
   }
 
+  function insertAfterLastBadge(target, badge) {
+    let anchor = target;
+    let next = target.nextElementSibling;
+    while (next && next.classList.contains("c411-dl-badge")) {
+      anchor = next;
+      next = next.nextElementSibling;
+    }
+
+    anchor.insertAdjacentElement("afterend", badge);
+  }
+
   function exactTooltip(release) {
     const parts = ["Torrent exact deja telecharge"];
     if (release.downloadedAt) {
-      parts.push(`le ${release.downloadedAt}`);
+      parts.push(`le ${formatDownloadedAt(release.downloadedAt)}`);
+    }
+    if (release.name) {
+      parts.push(release.name);
+    }
+    return parts.join("\n");
+  }
+
+  function seedTooltip(release) {
+    const parts = ["Seed actif"];
+    const ratio = seedRatio(release);
+    if (ratio !== null) {
+      parts.push(`ratio ${formatRatio(ratio)}`);
+    }
+    if (Number.isFinite(Number(release.seedingTime))) {
+      parts.push(`depuis ${formatDuration(Number(release.seedingTime))}`);
+    }
+    if (Number.isFinite(Number(release.uploaded))) {
+      parts.push(`upload ${formatBytes(Number(release.uploaded))}`);
     }
     if (release.name) {
       parts.push(release.name);
