@@ -495,6 +495,47 @@
     }, delayMs);
   }
 
+  function addManualDownloadFromAction(action) {
+    const infoHash = extractDownloadHash(action);
+    if (!infoHash) {
+      return false;
+    }
+
+    const release = normalizeRelease({
+      infoHash,
+      torrentId: null,
+      name: findDownloadName(action, infoHash),
+      category: null,
+      downloadedAt: formatUtcApiDate(new Date()),
+      source: "manual",
+    });
+
+    if (!release) {
+      return false;
+    }
+
+    const existingRelease = state.exactByHash.get(infoHash);
+    const mergedRelease = existingRelease ? mergeReleases(release, existingRelease) : release;
+    const wasKnown = Boolean(existingRelease);
+    const releases = state.cache.releases.filter((item) => item.infoHash !== infoHash);
+    releases.unshift(mergedRelease);
+
+    state.cache = {
+      ...state.cache,
+      total: wasKnown ? state.cache.total : Math.max(Number(state.cache.total) || 0, releases.length),
+      releases,
+    };
+
+    GM_setValue(STORAGE_KEY, state.cache);
+    rebuildIndexes();
+    queueTorrentDetailFetch(infoHash);
+    clearBadges();
+    scheduleAnnotate();
+    updateStatus("DL ajoute localement");
+
+    return true;
+  }
+
   async function syncDownloads({ force }) {
     if (state.syncInProgress) {
       return;
