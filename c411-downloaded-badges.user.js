@@ -4,6 +4,7 @@
 // @version      0.1.1
 // @description  Marque les torrents deja telecharges sur C411 avec des pastilles DL et ALT.
 // @author       Butchered
+// @icon         https://c411.org/favicon.ico
 // @match        https://c411.org/*
 // @run-at       document-idle
 // @grant        GM_addStyle
