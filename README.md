@@ -1,10 +1,10 @@
-# c411-scripting
+# tr4ker-scripting
 
-Scripts utilisateurs pour C411.
+Scripts utilisateurs pour Tr4ker.
 
-## C411 - Pastilles torrents téléchargés
+## Tr4ker - Pastilles torrents téléchargés
 
-Fichier : `c411-downloaded-badges.user.js`
+Fichier : `tr4ker-downloaded-badges.user.js`
 
 Ce script Tampermonkey ajoute des pastilles sur les listes de torrents :
 
@@ -27,14 +27,13 @@ La pastille `Seed` reflète le ratio du torrent :
 La synchronisation utilise les API connectées du site :
 
 ```text
-/api/profile/downloads?page=<page>&perPage=<perPage>
-/api/profile/active-seeds?page=<page>&perPage=<perPage>
-/api/torrents/<infoHash>
+/api/profile/downloads?limit=100&filter=all
+/api/torrents/<slug>
 ```
 
 Les téléchargements et les seeds actifs sont intégrés dans la même base locale. La source `active-seeds` est obligatoire : si toutes les pages de seeds actifs ne sont pas récupérées et intégrées, la synchronisation échoue au lieu de conserver une base partielle.
 
-Les détails de torrent récupérés via `/api/torrents/<infoHash>` servent à construire les matchs `ALT ✓` avec TMDB/IMDb. Si cette API renvoie `404`, le résultat est aussi mis en cache afin d'éviter de refaire le même appel systématiquement; le script peut alors utiliser le fallback `ALT!` par nom.
+Les détails de torrent récupérés via `/api/torrents/<slug>` servent à construire les matchs `ALT ✓` avec TMDB/IMDb. Si cette API renvoie `404`, le résultat est aussi mis en cache afin d'éviter de refaire le même appel systématiquement; le script peut alors utiliser le fallback `ALT!` par nom.
 
 ## Stockage
 
@@ -46,15 +45,15 @@ Le cache principal contient les torrents téléchargés, les seeds actifs et les
 
 1. Installer Tampermonkey.
 2. Créer un nouveau script.
-3. Coller le contenu de `c411-downloaded-badges.user.js`.
-4. Ouvrir une page C411 en étant connecté.
+3. Coller le contenu de `tr4ker-downloaded-badges.user.js`.
+4. Ouvrir une page Tr4ker en étant connecté.
 
-Le script synchronise automatiquement si aucun cache n'existe ou si le cache date de plus de 24 heures. Une synchronisation manuelle est disponible via le bouton `Sync` en bas à droite, ou via le menu Tampermonkey.
+Le script synchronise automatiquement si aucun cache n'existe ou si le cache date de plus de 1 heures. Une synchronisation manuelle est disponible via le bouton `Sync` en bas à droite, ou via le menu Tampermonkey.
 
-Quand un bouton ou lien de téléchargement est cliqué sur C411, le script ajoute le torrent localement dès que possible, puis relance une synchronisation automatique quelques secondes plus tard.
+Quand un bouton ou lien de téléchargement est cliqué sur Tr4ker, le script ajoute le torrent localement dès que possible, puis relance une synchronisation automatique quelques secondes plus tard.
 
 ## Menu Tampermonkey
 
-- `C411 DL - Synchroniser maintenant` : force une synchronisation complète.
-- `C411 DL - Vider le cache` : supprime le cache Tampermonkey du script.
-- `C411 DL - Debug API torrent` : interroge `/api/torrents/<infoHash>` et affiche la réponse dans la console.
+- `Tr4ker DL - Synchroniser maintenant` : force une synchronisation complète.
+- `Tr4ker DL - Vider le cache` : supprime le cache Tampermonkey du script.
+- `Tr4ker DL - Debug API torrent` : interroge `/api/torrents/<slug>` et affiche la réponse dans la console.
