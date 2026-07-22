@@ -44,8 +44,8 @@ Le cache principal contient les torrents téléchargés, les seeds actifs et les
 ## Installation
 
 1. Installer Tampermonkey.
-2. Créer un nouveau script.
-3. Coller le contenu de `tr4ker-downloaded-badges.user.js`.
+2. Aller sur le fichier `tr4ker-downloaded-badges.user.js`.
+3. Cliquer sur le bouton "raw".
 4. Ouvrir une page Tr4ker en étant connecté.
 
 Le script synchronise automatiquement si aucun cache n'existe ou si le cache date de plus de 1 heures. Une synchronisation manuelle est disponible via le bouton `Sync` en bas à droite, ou via le menu Tampermonkey.
